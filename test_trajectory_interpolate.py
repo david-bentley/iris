@@ -8,6 +8,7 @@ import iris
 from iris.coords import DimCoord, AuxCoord
 from iris.cube import Cube
 from iris.aux_factory import HybridHeightFactory
+from iris.analysis._interpolation import extend_circular_coord_and_data, extend_circular_coord, extend_circular_data
 import iris.analysis.trajectory
 import iris.coord_systems
 import iris.fileformats.pp
@@ -37,8 +38,8 @@ def create_cube():
     cs = iris.coord_systems.GeogCS(iris.fileformats.pp.EARTH_RADIUS)
     lat_coord = DimCoord(np.linspace(-90, 90, n_y), standard_name="latitude",
                          units="degrees", coord_system=cs)
-    lon_coord = DimCoord(np.linspace(-180, 180, n_x), standard_name="longitude",
-                         units="degrees", coord_system=cs)
+    lon_coord = DimCoord(np.linspace(-180, 180, n_x, endpoint=False), standard_name="longitude",
+                         units="degrees", coord_system=cs, circular=True)
 
     # attributes
     attributes = {"attribute1": 0,
@@ -78,6 +79,30 @@ def create_cube():
     return cube
 
 
+def _product(*args, related_index=None):
+    """
+    Return the product of the given arguments
+    """
+    out = []
+    if related_index == None:
+        index = [i for i in range(len(args))]
+        for combi in itertools.product(*args):
+            candidate = np.concatenate([np.atleast_1d(_) for _ in combi]) 
+            out.append(candidate[np.argsort(index)])
+    else:
+        index = [i for i in range(len(args)) if i not in related_index]
+        index.extend(related_index)
+        unrelated = [args[i] for i in range(len(args)) if i not in related_index]
+        related = [args[i] for i in range(len(args)) if i in related_index]
+        if len(set([len(el) for el in related])) > 1:
+            raise ValueError("the related items must have the same length")
+        unrelated.append(list(zip(*related)))
+        for combi in itertools.product(*unrelated):
+            candidate = np.concatenate([np.atleast_1d(_) for _ in combi]) 
+            out.append(candidate[np.argsort(index)])
+    return out
+
+
 def _interpolate(cube, sample_points, **kwargs):
     """
     Extract a sub-cube at the given n-dimensional points.
@@ -106,7 +131,6 @@ def _interpolate(cube, sample_points, **kwargs):
         points.append((coord, np.atleast_1d(values)))
         points_array[cube.coord_dims(coord)[0]] = np.atleast_1d(values)
     sample_points = points
-    #points_array = np.array(points_array)
 
     # Do all value sequences have the same number of values?
     coord, values = sample_points[0]
@@ -124,6 +148,8 @@ def _interpolate(cube, sample_points, **kwargs):
                 )
                 raise iris.exceptions.CoordinateMultiDimError(msg)
 
+    cube_data = cube.data
+
     coord_names = [el[0].name() for el in sample_points]
     coord_dims = [(name, cube.coord_dims(name)) for name in coord_names]
 
@@ -137,7 +163,17 @@ def _interpolate(cube, sample_points, **kwargs):
 
     # determine any auxiliary coordinates/factories that span dimensions to be
     # interpolated over
-    dims = [coord.points for coord in cube.dim_coords]
+    dims = []
+    for coord in cube.dim_coords:
+        circular = getattr(coord, "circular", False)
+        if circular:
+            crd_dim = cube.coord_dims(coord)[0]
+            points, cube_data = extend_circular_coord_and_data(coord,
+                                                               cube_data,
+                                                               crd_dim)
+            dims.append(points)
+        else:
+            dims.append(coord.points)
     interpolation_dims = []
     for name, dim in coord_dims:
         interpolation_dims.extend(dim)
@@ -162,7 +198,7 @@ def _interpolate(cube, sample_points, **kwargs):
                 coords_to_keep.append((coord, coord_dims))
 
     # interpolate the data
-    f = RegularGridInterpolator(dims, cube.data, method="linear", **kwargs)
+    f = RegularGridInterpolator(dims, cube_data, method="linear", **kwargs)
     combinations = []
     options = len(cube.shape) * [None]
     for i, dim in enumerate(dims):
@@ -170,8 +206,8 @@ def _interpolate(cube, sample_points, **kwargs):
             options[i] = dim
     for key, val in points_array.items():
         options[key] = val
-    for combi in itertools.product(*options):
-        combinations.append(np.concatenate([np.atleast_1d(_) for _ in combi]))
+
+    combinations= _product(*options, related_index=interpolation_dims)
 
     array = f(combinations)
     out_shape = [s for i, s in enumerate(cube.shape) if i not in interpolation_dims]
@@ -188,8 +224,6 @@ def _interpolate(cube, sample_points, **kwargs):
         if coord.name() not in coord_names:
             out_cube.add_dim_coord(coord, coord_dim[-1])
 
-    print(out_cube)
-
     # add back in coordinates not spanning the dimensions that were interpolated over
     for coord, coord_dim in coords_to_keep:
         # scalar coords
@@ -205,7 +239,6 @@ def _interpolate(cube, sample_points, **kwargs):
 
     # add back in the coordinates spanning the dimensions that were interpolated over
     for coord, coord_dim in coords_to_remove:
-        print(coord.name())
         if coord.name() in coord_names:
             # this was one of the specified coordinates
             idx = [el[0].name() == coord.name() for el in sample_points].index(True)
@@ -233,20 +266,22 @@ def _interpolate(cube, sample_points, **kwargs):
             for crd, (old_dim, new_dim) in shifted_dim_coords:
                 if crd.name() in [el[0] for el in spanned_dimensions] and crd.name() not in coord_names:
                     target_dim.append(new_dim)
+            related_index = []
             for sample_coord, sample_values in sample_points:
                 check = [sample_coord.name() == el[0] for el in spanned_dimensions]
                 if any(check):
-                    print(sample_coord.name())
                     idx = check.index(True)
+                    related_index.append(idx)
                     target_points[idx] = sample_values
                     arr_shape[idx] = len(sample_values)
                     for crd, (old_dim, new_dim) in shifted_dim_coords:
                         if crd.name() == sample_coord.name():
                             target_dim.extend(new_dim)
             target_dim.append(len(out_cube.shape) - 1)
-            combinations = []
-            for combi in itertools.product(*target_points):
-                combinations.append(np.concatenate([np.atleast_1d(_) for _ in combi]))
+            combinations = _product(*target_points, related_index=tuple(related_index))
+#            for combi in itertools.product(*target_points):
+#                candidate = np.concatenate([np.atleast_1d(_) for _ in combi])
+#                combinations.append(candidate)
             coord_points = f(combinations)
             if len(set_dims.intersection(set_span)) > 0:
                 coord_points = coord_points.reshape(arr_shape)
@@ -265,7 +300,6 @@ def _interpolate(cube, sample_points, **kwargs):
         for coord in fact.dependencies.values():
             coord_mapping[id(coord)] = out_cube.coord(coord.name())
         out_cube.add_aux_factory(fact.updated(coord_mapping))
-        pass
 
     return out_cube
 
@@ -274,9 +308,9 @@ if __name__ == "__main__":
     cube = create_cube()
     print(cube)
 
-    trajectory = np.array([np.array((-50 + i, -50 + i)) for i in range(1)])
-#    sample_points = [("longitude", trajectory[:, 0]), ("latitude", trajectory[:, 1]), ("model_level_number", [6])]
-    sample_points = [("longitude", trajectory[:, 0]), ("latitude", trajectory[:, 1])]
+    trajectory = np.array([np.array((-50 + i, -50 + i)) for i in range(3)])
+#    sample_points = [("longitude", trajectory[:, 0]), ("latitude", trajectory[:, 1]), ("model_level_number", [6, 7, 8])]
+    sample_points = [("longitude", trajectory[:, 0])]#, ("latitude", trajectory[:, 1])]
 
     start = time.time()
     traj_cube = _interpolate(cube, sample_points)
@@ -298,3 +332,6 @@ if __name__ == "__main__":
     print("are results the same? {}".format(np.allclose(traj_cube.data, traj_cube_iris.data)))
 #    print(traj_cube.data)
 #    print(traj_cube_iris.data)
+
+    for coord1, coord2 in zip(traj_cube.coords(), traj_cube_iris.coords()):
+        print(coord1, coord2)
