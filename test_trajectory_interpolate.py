@@ -8,7 +8,7 @@ import iris
 from iris.coords import DimCoord, AuxCoord
 from iris.cube import Cube
 from iris.aux_factory import HybridHeightFactory
-from iris.analysis._interpolation import extend_circular_coord_and_data, extend_circular_coord, extend_circular_data
+from iris.analysis._interpolation import extend_circular_coord_and_data
 import iris.analysis.trajectory
 import iris.coord_systems
 import iris.fileformats.pp
@@ -279,9 +279,6 @@ def _interpolate(cube, sample_points, **kwargs):
                             target_dim.extend(new_dim)
             target_dim.append(len(out_cube.shape) - 1)
             combinations = _product(*target_points, related_index=tuple(related_index))
-#            for combi in itertools.product(*target_points):
-#                candidate = np.concatenate([np.atleast_1d(_) for _ in combi])
-#                combinations.append(candidate)
             coord_points = f(combinations)
             if len(set_dims.intersection(set_span)) > 0:
                 coord_points = coord_points.reshape(arr_shape)
@@ -310,7 +307,7 @@ if __name__ == "__main__":
 
     trajectory = np.array([np.array((-50 + i, -50 + i)) for i in range(3)])
 #    sample_points = [("longitude", trajectory[:, 0]), ("latitude", trajectory[:, 1]), ("model_level_number", [6, 7, 8])]
-    sample_points = [("longitude", trajectory[:, 0])]#, ("latitude", trajectory[:, 1])]
+    sample_points = [("longitude", trajectory[:, 0]), ("latitude", trajectory[:, 1])]
 
     start = time.time()
     traj_cube = _interpolate(cube, sample_points)
