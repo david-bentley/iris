@@ -164,6 +164,7 @@ def _interpolate(cube, sample_points, **kwargs):
     # determine any auxiliary coordinates/factories that span dimensions to be
     # interpolated over
     dims = []
+    sort_idx = len(cube.shape) * [slice(None)]
     for coord in cube.dim_coords:
         circular = getattr(coord, "circular", False)
         if circular:
@@ -171,9 +172,17 @@ def _interpolate(cube, sample_points, **kwargs):
             points, cube_data = extend_circular_coord_and_data(coord,
                                                                cube_data,
                                                                crd_dim)
+        else:
+            points = coord.points
+        # check the array is ascending - arrays will be monotonic because they
+        # are DimCoords
+        if np.all(points[:-1] <= points[1:]):
             dims.append(points)
         else:
-            dims.append(coord.points)
+            dims.append(points[::-1])
+            sort_idx[cube.coord_dims(coord)[0]] = slice(None, None, -1)
+    cube_data = cube_data[tuple(sort_idx)]
+
     interpolation_dims = []
     for name, dim in coord_dims:
         interpolation_dims.extend(dim)
@@ -283,12 +292,12 @@ def _interpolate(cube, sample_points, **kwargs):
             if len(set_dims.intersection(set_span)) > 0:
                 coord_points = coord_points.reshape(arr_shape)
 
-        new_coord = AuxCoord(coord_points,
-                             standard_name=coord.standard_name,
-                             long_name=coord.long_name,
-                             var_name=coord.var_name,
-                             units=coord.units,
-                             attributes=coord.attributes)
+        new_coord = iris.coords.AuxCoord(coord_points,
+                                         standard_name=coord.standard_name,
+                                         long_name=coord.long_name,
+                                         var_name=coord.var_name,
+                                         units=coord.units,
+                                         attributes=coord.attributes)
         out_cube.add_aux_coord(new_coord, target_dim)
 
     # add back in the aux factories
@@ -305,7 +314,7 @@ if __name__ == "__main__":
     cube = create_cube()
     print(cube)
 
-    trajectory = np.array([np.array((-50 + i, -50 + i)) for i in range(3)])
+    trajectory = np.array([np.array((-50 + i, -50 + i)) for i in range(10)])
 #    sample_points = [("longitude", trajectory[:, 0]), ("latitude", trajectory[:, 1]), ("model_level_number", [6, 7, 8])]
     sample_points = [("longitude", trajectory[:, 0]), ("latitude", trajectory[:, 1])]
 
@@ -330,5 +339,5 @@ if __name__ == "__main__":
 #    print(traj_cube.data)
 #    print(traj_cube_iris.data)
 
-    for coord1, coord2 in zip(traj_cube.coords(), traj_cube_iris.coords()):
-        print(coord1, coord2)
+#    for coord1, coord2 in zip(traj_cube.coords(), traj_cube_iris.coords()):
+#        print(coord1, coord2)
